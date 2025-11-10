@@ -200,6 +200,11 @@ class ZeroMathArgs(PPOArgs):
     use_gspo: bool = (
         False  # Seq-IS with geometric mean + biased GRPO (with Adv & Len normalization)
     )
+    # Precision.
+    norm_in_fp32: bool = field(
+        default=False,
+        metadata={"help": "Cast normalization layer weights (e.g., Qwen2RMSNorm) to FP32 for improved update precision."}
+    )
 
 
 """
@@ -336,6 +341,24 @@ class ZeroMathActor(PPOActor):
 class ZeroMathLearner(PPOLearner):
     def _init(self, args: ZeroMathArgs, actors: List[ActorBase]) -> None:
         super()._init(args, actors)
+        
+        # Cast normalization weights to FP32 if requested
+        if args.norm_in_fp32:
+            from oat.utils.precision import _cast_rmsnorm_weights_to_fp32
+            import logging
+            logging.info("="*80)
+            logging.info("NORM_IN_FP32 ENABLED: Casting normalization weights to FP32...")
+            logging.info("="*80)
+            num_converted = _cast_rmsnorm_weights_to_fp32(self.model.model)
+            logging.info(f"Policy model: Converted {num_converted} normalization layers to FP32")
+            if self.ref_model is not None:
+                num_converted = _cast_rmsnorm_weights_to_fp32(self.ref_model.model)
+                logging.info(f"Reference model: Converted {num_converted} normalization layers to FP32")
+            if self.critic is not None:
+                num_converted = _cast_rmsnorm_weights_to_fp32(self.critic.model)
+                logging.info(f"Critic model: Converted {num_converted} normalization layers to FP32")
+            logging.info("="*80)
+        
         self.eval_dataset_dict = load_data_from_disk_or_hf(args.eval_data)
         if args.test_split != "all":
             self.eval_dataset_dict = {
