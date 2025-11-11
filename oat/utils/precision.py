@@ -136,3 +136,35 @@ def _cast_rmsnorm_weights_to_fp32(model, base_dtype=None) -> int:
     )
     logger.info(f"Registered {hooks_registered} forward hooks to cast outputs back to {base_dtype}")
     return total_converted
+
+
+def _cast_norm_weights_for_sync(model, target_dtype):
+    """Temporarily cast norm weights to target dtype for weight synchronization.
+    
+    This function is needed when syncing weights from learner (with FP32 norms)
+    to actors/vLLM (expecting FP16/BF16). Call this before weight sync, then call
+    _cast_rmsnorm_weights_to_fp32 again after sync to restore FP32 precision.
+    
+    Args:
+        model: The model whose norm weights should be cast
+        target_dtype: Target dtype (torch.float16 or torch.bfloat16)
+    
+    Returns:
+        int: Number of norm weights cast
+    """
+    if target_dtype == torch.float32:
+        return 0
+    
+    converted = 0
+    for module in model.modules():
+        if "RMSNorm" in type(module).__name__ or "LayerNorm" in type(module).__name__:
+            if hasattr(module, "weight") and module.weight is not None:
+                if module.weight.dtype != target_dtype:
+                    module.weight.data = module.weight.data.to(target_dtype)
+                    converted += 1
+            if hasattr(module, "bias") and module.bias is not None:
+                if module.bias.dtype != target_dtype:
+                    module.bias.data = module.bias.data.to(target_dtype)
+    
+    logger.debug(f"Cast {converted} norm weights to {target_dtype} for weight sync")
+    return converted

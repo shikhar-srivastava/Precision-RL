@@ -342,6 +342,9 @@ class ZeroMathLearner(PPOLearner):
     def _init(self, args: ZeroMathArgs, actors: List[ActorBase]) -> None:
         super()._init(args, actors)
         
+        # Store the base dtype for later use
+        self._base_dtype = torch.float16 if args.fp16 else torch.bfloat16 if args.bf16 else torch.float32
+        
         # Cast normalization weights to FP32 if requested
         if args.norm_in_fp32:
             from oat.utils.precision import _cast_rmsnorm_weights_to_fp32
@@ -349,13 +352,13 @@ class ZeroMathLearner(PPOLearner):
             logging.info("="*80)
             logging.info("NORM_IN_FP32 ENABLED: Casting normalization weights to FP32...")
             logging.info("="*80)
-            num_converted = _cast_rmsnorm_weights_to_fp32(self.model.model)
+            num_converted = _cast_rmsnorm_weights_to_fp32(self.model.model, base_dtype=self._base_dtype)
             logging.info(f"Policy model: Converted {num_converted} normalization layers to FP32")
             if self.ref_model is not None:
-                num_converted = _cast_rmsnorm_weights_to_fp32(self.ref_model.model)
+                num_converted = _cast_rmsnorm_weights_to_fp32(self.ref_model.model, base_dtype=self._base_dtype)
                 logging.info(f"Reference model: Converted {num_converted} normalization layers to FP32")
             if self.critic is not None:
-                num_converted = _cast_rmsnorm_weights_to_fp32(self.critic.model)
+                num_converted = _cast_rmsnorm_weights_to_fp32(self.critic.model, base_dtype=self._base_dtype)
                 logging.info(f"Critic model: Converted {num_converted} normalization layers to FP32")
             logging.info("="*80)
         
@@ -377,6 +380,28 @@ class ZeroMathLearner(PPOLearner):
             self.masked_aggregator = functools.partial(
                 masked_sum, constant_normalizer=args.generate_max_length
             )
+    
+    def sync_weights_to_actors(self):
+        """Override to handle FP32 norm weights before syncing to actors."""
+        if not self.args.norm_in_fp32:
+            # No special handling needed
+            return super().sync_weights_to_actors()
+        
+        # Temporarily cast norm weights to base dtype for sync
+        from oat.utils.precision import _cast_norm_weights_for_sync, _cast_rmsnorm_weights_to_fp32
+        import logging
+        
+        logging.debug("Temporarily casting norm weights to base dtype for actor sync...")
+        _cast_norm_weights_for_sync(self.model.model, self._base_dtype)
+        
+        # Sync weights to actors
+        result = super().sync_weights_to_actors()
+        
+        # Restore FP32 precision for norm weights
+        logging.debug("Restoring FP32 precision for norm weights after sync...")
+        _cast_rmsnorm_weights_to_fp32(self.model.model, base_dtype=self._base_dtype)
+        
+        return result
 
     # Dr. GRPO Modification 2: Remove difficulty bias by just computing the MC advantage without dividing by std:
     def compute_monte_carlo_advantages(self, rewards, response_masks):
